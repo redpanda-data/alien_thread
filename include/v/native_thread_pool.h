@@ -15,6 +15,7 @@
 
 #include <seastar/core/future.hh>
 #include <seastar/core/gate.hh>
+#include <seastar/core/reactor.hh>
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/sharded.hh>
 
@@ -31,19 +32,19 @@ namespace v {
 class Condition {
     seastar::file_desc file_desc;
     int fd;
-    seastar::pollable_fd_state fd_state;
+    seastar::pollable_fd pollable_fd;
     eventfd_t event = 0;
 
 public:
     Condition()
       : file_desc{seastar::file_desc::eventfd(0, 0)}
       , fd(file_desc.get())
-      , fd_state{std::move(file_desc)} {
+      , pollable_fd{std::move(file_desc)} {
     }
     seastar::future<> wait() {
-        return seastar::engine()
-          .read_some(fd_state, &event, sizeof(event))
-          .then([](size_t) { return seastar::now(); });
+        return pollable_fd
+          .read_some(reinterpret_cast<char*>(&event), sizeof(event))
+          .then([](size_t) { return seastar::make_ready_future<>(); });
     }
     void notify() {
         eventfd_t result = 1;
@@ -61,7 +62,7 @@ template<typename Func>
 //, typename... T = std::invoke_result_t<Func>>
 struct Task final : WorkItem {
     Func func;
-    seastar::future_state<> state;
+    seastar::future_state<int> state;
     Condition on_done;
 
 public:
@@ -71,7 +72,7 @@ public:
     void process() override {
         try {
             func();
-            state.set();
+            state.set(0);
         } catch (...) {
             state.set_exception(std::current_exception());
         }
